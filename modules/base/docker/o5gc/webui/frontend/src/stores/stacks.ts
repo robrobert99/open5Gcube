@@ -4,11 +4,18 @@ import { generateErrorNotification } from './common';
 import { useEventLogStore } from './event-log';
 import { useSettingsStore } from './settings';
 
+export type EnvPresetsStack = {
+  module_name: string,
+  stack_name: string,
+  presets: string[]
+}
+
 type StackStoreType = {
   globalEnv: string|null,
   moduleEnvs: {[key: string]: string|null},
   stacks: {[key: string]: {[key:string]: any}},
   runningStacks: string[],
+  envPresets: EnvPresetsStack[]|null,
   eventLogStore: any,
   settingsStore: any
 }
@@ -34,11 +41,12 @@ export const useStackStore = defineStore('stacks', {
     const moduleEnvs: {[key: string]: string|null} = {};
     const stacks: {[key: string]: {[key:string]: any}} = {};
     const runningStacks: string[] = [];
+    const envPresets: EnvPresetsStack[]|null = null;
     const eventLogStore = useEventLogStore();
     const settingsStore = useSettingsStore();
 
     return {
-        globalEnv, moduleEnvs, stacks, runningStacks, eventLogStore, settingsStore // <-- ADDED to return
+        globalEnv, moduleEnvs, stacks, runningStacks, envPresets, eventLogStore, settingsStore // <-- ADDED to return
     }
   },
   getters: {
@@ -172,6 +180,43 @@ export const useStackStore = defineStore('stacks', {
         } else {
           handleEnvApiError(error, 'environment overrides', stackName);
         }
+      }
+    },
+    async loadEnvPresets() {
+      try {
+        this.envPresets = (await api.get('api/env-presets')).data.stacks;
+      } catch(error: any) {
+        handleEnvApiError(error, 'environment presets');
+      }
+    },
+    async getEnvPreset(stackName: string, presetName: string): Promise<string|null> {
+      try {
+        return (await api.get(`api/stack/${stackName}/env-presets/${presetName}`, { responseType: 'text', transformResponse: (data) => data })).data;
+      } catch(error: any) {
+        handleEnvApiError(error, `environment preset ${presetName}`, stackName);
+        return null;
+      }
+    },
+    async saveEnvPreset(stackName: string, presetName: string, content: string): Promise<boolean> {
+      try {
+        await api.put(`api/stack/${stackName}/env-presets/${presetName}`, content, { headers: { 'Content-Type': 'text/plain' } });
+        return true;
+      } catch(error: any) {
+        generateErrorNotification(`Saving environment preset ${presetName} for stack ${stackName} failed${error.response ? ': ' + error.response.data : '.'}`);
+        return false;
+      } finally {
+        await this.loadEnvPresets();
+      }
+    },
+    async deleteEnvPreset(stackName: string, presetName: string): Promise<boolean> {
+      try {
+        await api.delete(`api/stack/${stackName}/env-presets/${presetName}`);
+        return true;
+      } catch(error: any) {
+        generateErrorNotification(`Deleting environment preset ${presetName} of stack ${stackName} failed${error.response ? ': ' + error.response.data : '.'}`);
+        return false;
+      } finally {
+        await this.loadEnvPresets();
       }
     },
     async loadStackDescription(stackName: string) {

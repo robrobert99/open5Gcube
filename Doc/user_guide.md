@@ -212,6 +212,23 @@ text box on the right. When starting the Stack, the running configuration is bui
 global settings, overwritten by the Stack specific settings, overwritten by the temporary
 settings in the UI. The event log at the bottom shows the last performed actions.
 
+The overrides can be stored as named presets with the *save* button in the title bar of the
+overrides text box. The *open* button shows all presets of all Stacks, grouped by Module and Stack,
+with the current Stack expanded. A preset of any Stack can be loaded into the current Stack, which
+replaces the content of the text box. Presets are plain environment files stored in
+``var/env-presets/<module>/<stack>/<name>.env`` (ignored by git), so they can also be used on the
+command line from the repository root:
+
+```bash
+touch var/env-presets/<module>/<stack>/<name>.env   # make sure the running env is rebuilt
+make run-<stack> ENV_DIR=$PWD/var/tmp/preset-env \
+    ENV_OVERRIDES_PATH=var/env-presets/<module>/<stack>/<name>.env
+```
+
+The separate ``ENV_DIR`` (must be an absolute path) keeps the running environment built with the
+preset apart from the default one, so a later ``make run-<stack>`` without the preset is not
+affected by it.
+
 After a stack has been started, the *Service Links* sub-menu on the left side is filled with
 links to running web services that are provided by the Stack.
 

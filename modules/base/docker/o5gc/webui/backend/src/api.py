@@ -1,4 +1,5 @@
 import importlib
+import os
 import shlex
 import re
 import docker
@@ -42,6 +43,20 @@ def get_module(stack_name):
         if stack['stack_name'] == stack_name:
             return stack['module_name']
     return None
+
+def chown_to_host_user(path: Path):
+    # The webui runs as root, but files written into the repository should belong to the host user
+    try:
+        uid, gid = (int(i) for i in current_app.config.get("HOST_USER_GROUP_ID", "").split(":"))
+    except (AttributeError, ValueError):
+        return
+    os.chown(path, uid, gid)
+
+def mkdir_owned_by_host_user(path: Path):
+    missing_dirs = [p for p in [path, *path.parents] if not p.exists()]
+    path.mkdir(parents=True, exist_ok=True)
+    for p in missing_dirs:
+        chown_to_host_user(p)
 
 def run_cmd(cmd):
     cmd = [c for c in cmd if c is not None]
@@ -90,7 +105,7 @@ def start_stack(stack_name: str):
 
     # Create file with environment variables
     env_filepath: Path = current_app.config["ENV_OVERRIDES_DIR"] / f"env-overrides-{stack_name}.env"
-    current_app.config["ENV_OVERRIDES_DIR"].mkdir(parents=True, exist_ok=True)
+    mkdir_owned_by_host_user(current_app.config["ENV_OVERRIDES_DIR"])
     with open(env_filepath, "w") as envfile:
         if "env" in payload:
             for env_var, env_val in payload.get("env", {}).items():
@@ -99,6 +114,7 @@ def start_stack(stack_name: str):
             envfile.write(payload["env_file"].strip())
         else:
             envfile.write("")
+    chown_to_host_user(env_filepath)
 
     # Call Makefile
     output, returncode = run_cmd(["make", f"run-{stack_name}", "DETACHED=1", f"ENV_DIR=/tmp",
@@ -161,6 +177,73 @@ def get_stack_env_overrides(stack_name: str):
         return "Stack does not have environment overrides or does not exist.", HTTPStatus.NOT_FOUND
 
     return Response(env_filepath.read_text(), content_type="text/x-sh")
+
+
+ENV_PRESET_NAME_REGEX = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+def is_valid_env_preset_name(preset_name: str):
+    return bool(ENV_PRESET_NAME_REGEX.match(preset_name)) and preset_name not in (".", "..")
+
+def get_env_preset_path(stack_name: str, preset_name: str):
+    """Returns (path, None) on success or (None, (error message, status)) on failure."""
+    module_name = get_module(stack_name)
+    if not module_name:
+        return None, ("Stack does not exist.", HTTPStatus.NOT_FOUND)
+
+    if not is_valid_env_preset_name(preset_name):
+        return None, ("Invalid preset name. Allowed are 1-64 alphanumeric characters, _, - and .",
+                      HTTPStatus.BAD_REQUEST)
+
+    stack_presets_dir: Path = current_app.config["ENV_PRESETS_DIR"] / module_name / stack_name
+    preset_path = stack_presets_dir / f"{preset_name}.env"
+    if not preset_path.parent == stack_presets_dir:
+        return None, ("Path traversal detected.", HTTPStatus.FORBIDDEN)
+
+    return preset_path, None
+
+@bp.get('/env-presets')
+def get_env_presets():
+    presets_dir: Path = current_app.config["ENV_PRESETS_DIR"]
+    stacks = get_stacks()["stacks"]
+    for stack in stacks:
+        stack_presets_dir = presets_dir / stack["module_name"] / stack["stack_name"]
+        stack["presets"] = sorted(p.stem for p in stack_presets_dir.glob("*.env")
+                                  if p.is_file() and is_valid_env_preset_name(p.stem))
+    return {"stacks": stacks}
+
+@bp.get('/stack/<string:stack_name>/env-presets/<string:preset_name>')
+def get_env_preset(stack_name: str, preset_name: str):
+    preset_path, error = get_env_preset_path(stack_name, preset_name)
+    if error:
+        return error
+    if not preset_path.is_file():
+        return "Preset does not exist.", HTTPStatus.NOT_FOUND
+    return Response(preset_path.read_text(), content_type="text/x-sh")
+
+@bp.put('/stack/<string:stack_name>/env-presets/<string:preset_name>')
+def save_env_preset(stack_name: str, preset_name: str):
+    preset_path, error = get_env_preset_path(stack_name, preset_name)
+    if error:
+        return error
+    if preset_path.exists() and not preset_path.is_file():
+        return "Preset exists, but is not a regular file.", HTTPStatus.INTERNAL_SERVER_ERROR
+
+    existed_before = preset_path.is_file()
+    mkdir_owned_by_host_user(preset_path.parent)
+    preset_path.write_text(request.get_data(as_text=True))
+    chown_to_host_user(preset_path)
+
+    return f"Preset {preset_name} saved.", HTTPStatus.OK if existed_before else HTTPStatus.CREATED
+
+@bp.delete('/stack/<string:stack_name>/env-presets/<string:preset_name>')
+def delete_env_preset(stack_name: str, preset_name: str):
+    preset_path, error = get_env_preset_path(stack_name, preset_name)
+    if error:
+        return error
+    if not preset_path.is_file():
+        return "Preset does not exist.", HTTPStatus.NOT_FOUND
+    preset_path.unlink()
+    return "Preset deleted.", HTTPStatus.OK
 
 
 def replace_relative_path(match, prefix):

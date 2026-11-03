@@ -25,6 +25,7 @@ services:
     environment:
       - BASE
       - HOST_HOME=${HOME}
+      - HOST_USER_GROUP_ID
       - ENB_HOSTNAME
       - GNB_HOSTNAME
     volumes:
